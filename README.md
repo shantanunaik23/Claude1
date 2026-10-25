@@ -31,6 +31,19 @@ nothing happening.
 
 Input order never matters; the engine matches on a sorted key.
 
+### On a phone
+
+Dragging out of a scrolling pantry fights the scroll, so touch gets a tap
+language instead and the whole game is playable without a single drag:
+
+- **Tap a pantry item** to put it on the bench.
+- **Tap a bench chip** to select it (it gets a ring), then tap another chip, a
+  station, or the prep bowl to combine or move it. Tap empty bench to deselect.
+- **Tap a bowl chip** to take it back out — unless something is selected, in
+  which case the tap drops the selection in instead.
+
+Dragging still works on the bench, where there is nothing to scroll past.
+
 ## Adding content
 
 Recipes are data, not code. Add an item to `src/data/items.ts` and a line to

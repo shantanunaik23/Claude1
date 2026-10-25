@@ -41,6 +41,9 @@ body.dragging { cursor: grabbing; }
 #app {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  /* Without this the implicit column sizes to the rail's max-content, and a
+     cuisine with a dozen stations pushes the pantry off the screen. */
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* ------------------------------------------------------------------ topbar */
@@ -148,6 +151,7 @@ body.dragging { cursor: grabbing; }
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
   min-height: 0;
+  min-width: 0;
 }
 
 .bench {
@@ -292,9 +296,29 @@ body.dragging { cursor: grabbing; }
   z-index: 2;
 }
 
-/* While a chip is selected, show what it can be dropped onto. */
-body.has-selection .station-tile,
-body.has-selection .bowl { border-color: var(--accent); }
+/*
+ * Match highlighting. A selection marks every target that forms a recipe with
+ * it; everything else fades back so the eye lands on what will actually work.
+ */
+.chip.is-match {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 14px -4px var(--accent);
+}
+
+/* Shares a three-input recipe: a lead, but it has to go through the bowl. */
+.chip.is-mate {
+  border-color: #8a6836;
+  border-style: dashed;
+}
+
+body.hinting .chip:not(.is-match):not(.is-mate):not(.is-selected) { opacity: 0.3; }
+body.hinting .chip.is-mate { opacity: 0.78; }
+body.hinting .bowl:not(.is-match) { opacity: 0.45; }
+body.hinting .bowl.is-match { border-color: var(--accent); border-style: solid; }
+
+/* With highlighting off, still show that the selection has somewhere to go. */
+body.has-selection:not(.hinting) .station-tile,
+body.has-selection:not(.hinting) .bowl { border-color: var(--accent); }
 
 .station-tile { flex-direction: column; padding: 10px 12px; gap: 4px; min-width: 84px; text-align: center; }
 .station-tile .icon { font-size: 24px; width: auto; }
@@ -331,9 +355,13 @@ body.has-selection .bowl { border-color: var(--accent); }
 
 /* -------------------------------------------------------------------- rail */
 
+/*
+ * Flex rather than grid: a cuisine can bring a dozen stations, and an `auto`
+ * grid track would size to all of them and crush the bowl. Here the rail keeps
+ * the bowl at a usable width and the stations scroll instead.
+ */
 .rail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   gap: 16px;
   height: var(--rail-h);
   padding: 12px 16px;
@@ -343,7 +371,13 @@ body.has-selection .bowl { border-color: var(--accent); }
   min-height: 0;
 }
 
-.bowl-wrap { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 8px; min-width: 0; }
+.bowl-wrap {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 8px;
+  flex: 1 1 340px;
+  min-width: 240px;
+}
 
 .bowl {
   border: 1.5px dashed var(--line);
@@ -378,6 +412,8 @@ body.has-selection .bowl { border-color: var(--accent); }
 .stations {
   display: flex;
   gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
@@ -456,10 +492,56 @@ body.has-selection .bowl { border-color: var(--accent); }
 .modal-body { overflow-y: auto; overscroll-behavior: contain; padding: 6px 18px 18px; }
 .modal-body h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-dim); margin: 18px 0 6px; }
 
-.book-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.book-table th { text-align: left; font-weight: 600; padding: 7px 12px 7px 0; vertical-align: top; width: 42%; }
+.book-table { width: 100%; border-collapse: collapse; font-size: 13px; }.book-table th { text-align: left; font-weight: 600; padding: 7px 12px 7px 0; vertical-align: top; width: 42%; }
 .book-table td { color: var(--ink-dim); padding: 7px 0; vertical-align: top; }
 .book-table tr + tr th, .book-table tr + tr td { border-top: 1px solid var(--line); }
+
+/* ------------------------------------------------------- kitchen & setup */
+
+.btn-kitchen { display: inline-flex; align-items: center; gap: 7px; }
+.kitchen-size {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: #ffffff14;
+  color: var(--ink-dim);
+}
+
+.choices { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+
+.choice {
+  font: inherit;
+  text-align: left;
+  display: grid;
+  gap: 3px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--ink);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.choice:hover { border-color: #56463a; }
+.choice.is-active { border-color: var(--accent); background: #33281b; }
+.choice-icon { font-size: 22px; }
+.choice-name { font-weight: 600; font-size: 14px; }
+.choice-blurb { font-size: 12px; color: var(--ink-dim); line-height: 1.45; }
+
+.setup-summary {
+  margin: 18px 0 0;
+  padding: 11px 13px;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+
+.setup-go { width: 100%; margin-top: 12px; padding: 11px; font-size: 14px; }
 
 /* ----------------------------------------------------------- touch devices */
 
@@ -484,6 +566,8 @@ body.has-selection .bowl { border-color: var(--accent); }
   .progress-bar { display: none; }
   .progress { flex: 1; justify-content: flex-start; font-size: 12px; }
   .progress-word { display: none; }
+  .kitchen-name { display: none; }
+  .btn-kitchen { padding: 7px 9px; }
   .progress::after { content: " found"; }
 
   .bench { order: 1; flex: 1 1 auto; min-height: 120px; }
@@ -499,7 +583,7 @@ body.has-selection .bowl { border-color: var(--accent); }
     padding: 8px 12px;
   }
 
-  .bowl-wrap { display: flex; align-items: stretch; gap: 8px; }
+  .bowl-wrap { display: flex; align-items: stretch; gap: 8px; flex: 0 0 auto; min-width: 0; }
   .bowl { flex: 1 1 auto; display: flex; align-items: center; padding: 6px 9px; min-height: 48px; }
   .bowl-label { display: none; }
   .bowl-items { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; width: 100%; }

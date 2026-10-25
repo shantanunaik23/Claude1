@@ -1,31 +1,55 @@
 import './styles.css';
-import { ITEMS, getItem } from './data/items';
-import { combine, findHint, recipesFor, TOTAL_DISCOVERABLE } from './engine';
-import { beginDrag, initDrag, type DragPayload } from './drag';
-import { GameState } from './state';
-import type { Item, ItemKind } from './types';
+import { getItem } from './data/index.ts';
+import {
+  buildKitchen,
+  combine,
+  findHint,
+  bowlMatesOf,
+  partnersOf,
+  recipesFor,
+  type Config,
+  type Kitchen,
+} from './engine.ts';
+import { beginDrag, initDrag, type DragPayload } from './drag.ts';
+import { GameState } from './state.ts';
+import {
+  CUISINES,
+  PANTRY_SIZES,
+  type CuisineId,
+  type Item,
+  type ItemKind,
+  type PantrySize,
+} from './types.ts';
 
 const state = new GameState();
 state.load();
+const firstRun = !state.configured;
+
+let kitchen: Kitchen = buildKitchen(state.config);
 
 // ---------------------------------------------------------------- shell
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">🍳</span><h1>Kitchen Alchemy</h1></div>
+    <div class="brand">
+      <span class="brand-mark" id="brand-mark">🍳</span>
+      <h1>Kitchen Alchemy</h1>
+    </div>
     <div class="progress">
       <div class="progress-bar"><span id="progress-fill"></span></div>
       <span id="progress-label"></span>
     </div>
     <div class="topbar-actions">
+      <button id="kitchen-btn" class="btn btn-kitchen"></button>
       <button id="hint-btn" class="btn">Hint</button>
       <details class="menu" id="menu">
         <summary class="btn" title="More actions">⋯</summary>
         <div class="menu-pop">
           <button id="book-btn">Recipe Book</button>
+          <button id="highlight-btn">Highlight matches</button>
           <button id="clear-btn">Clear Bench</button>
-          <button id="reset-btn">Reset Progress</button>
+          <button id="reset-btn">Reset This Kitchen</button>
         </div>
       </details>
     </div>
@@ -62,10 +86,28 @@ app.innerHTML = `
   </footer>
 
   <div class="toasts" id="toasts"></div>
+
   <div class="modal" id="book" hidden>
     <div class="modal-card">
       <div class="modal-head"><h2>Recipe Book</h2><button id="book-close" class="btn btn-quiet">Close</button></div>
       <div class="modal-body" id="book-body"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="setup" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Choose your kitchen</h2>
+        <button id="setup-close" class="btn btn-quiet" hidden>Close</button>
+      </div>
+      <div class="modal-body">
+        <h3>Cuisine</h3>
+        <div class="choices" id="cuisine-choices"></div>
+        <h3>Pantry size</h3>
+        <div class="choices" id="size-choices"></div>
+        <p class="setup-summary" id="setup-summary"></p>
+        <button class="btn btn-primary setup-go" id="setup-go">Start cooking</button>
+      </div>
     </div>
   </div>
 `;
@@ -81,6 +123,7 @@ const searchInput = document.querySelector<HTMLInputElement>('#search')!;
 const filtersEl = document.querySelector<HTMLElement>('#filters')!;
 const bookEl = document.querySelector<HTMLElement>('#book')!;
 const bookBody = document.querySelector<HTMLElement>('#book-body')!;
+const setupEl = document.querySelector<HTMLElement>('#setup')!;
 const menu = document.querySelector<HTMLDetailsElement>('#menu')!;
 
 /**
@@ -89,6 +132,13 @@ const menu = document.querySelector<HTMLDetailsElement>('#menu')!;
  * tapped. Pointer users can ignore this entirely and keep dragging.
  */
 let selectedUid: number | null = null;
+
+const NO_MATCHES: ReadonlySet<string> = new Set();
+/** Ids that pair with the current selection; drives the match highlighting. */
+let matches: ReadonlySet<string> = NO_MATCHES;
+/** Ids that only work with the selection via a three-input bowl recipe. */
+let mates: ReadonlySet<string> = NO_MATCHES;
+let bowlMatches = false;
 
 // ---------------------------------------------------------------- chip DOM
 
@@ -109,6 +159,7 @@ function iconMarkup(item: Item): string {
 function chipEl(item: Item, extraClass = ''): HTMLElement {
   const el = document.createElement('div');
   el.className = `chip chip-${item.kind} ${extraClass}`.trim();
+  el.dataset.item = item.id;
   el.innerHTML = `${iconMarkup(item)}<span class="label">${item.name}</span>`;
   el.title = item.blurb ?? item.name;
   return el;
@@ -155,7 +206,7 @@ function renderFilters(): void {
 }
 
 function renderPantry(): void {
-  const items = [...ITEMS.values()]
+  const items = [...kitchen.items.values()]
     .filter((i) => i.kind !== 'station' && state.discovered.has(i.id))
     .filter((i) => filter === 'all' || i.kind === filter)
     .filter((i) => i.name.toLowerCase().includes(query))
@@ -173,12 +224,12 @@ function renderPantry(): void {
       return el;
     }),
   );
+  paintHints();
 }
 
 function renderStations(): void {
-  const stations = [...ITEMS.values()].filter((i) => i.kind === 'station');
   stationsEl.replaceChildren(
-    ...stations.map((item) => {
+    ...kitchen.stations.map((item) => {
       const el = chipEl(item, 'chip-tile station-tile');
       el.dataset.drop = 'station';
       el.dataset.id = item.id;
@@ -186,6 +237,7 @@ function renderStations(): void {
       return el;
     }),
   );
+  paintHints();
 }
 
 function renderBoard(): void {
@@ -206,6 +258,7 @@ function renderBoard(): void {
     board.appendChild(el);
   }
   settleChips();
+  updateMatches();
 }
 
 /**
@@ -239,24 +292,36 @@ function renderBowl(): void {
       `<span class="hint-pointer">Drop 2 or more things here, then Mix — or tap a station.</span>` +
       `<span class="hint-touch">Add 2 or more, then Mix.</span>` +
       `</p>`;
-    return;
+  } else {
+    bowlItems.replaceChildren(
+      ...state.bowl.map((id, index) => {
+        const item = getItem(id);
+        const el = chipEl(item, 'chip-tile');
+        dragSource(el, () => ({ itemId: id, fromUid: null, fromBowl: index }), item, true);
+        return el;
+      }),
+    );
   }
-  bowlItems.replaceChildren(
-    ...state.bowl.map((id, index) => {
-      const item = getItem(id);
-      const el = chipEl(item, 'chip-tile');
-      dragSource(el, () => ({ itemId: id, fromUid: null, fromBowl: index }), item, true);
-      return el;
-    }),
-  );
+  paintHints();
 }
 
 function renderProgress(): void {
   const found = [...state.discovered].filter((id) => getItem(id).kind !== 'station').length;
-  const pct = Math.round((found / TOTAL_DISCOVERABLE) * 100);
+  const pct = Math.round((found / kitchen.discoverable) * 100);
   document.querySelector<HTMLElement>('#progress-fill')!.style.width = `${pct}%`;
   document.querySelector<HTMLElement>('#progress-label')!.innerHTML =
-    `${found}<span class="sep"> / </span>${TOTAL_DISCOVERABLE}<span class="progress-word"> discovered</span>`;
+    `${found}<span class="sep"> / </span>${kitchen.discoverable}<span class="progress-word"> discovered</span>`;
+}
+
+function renderKitchenBadge(): void {
+  const cuisine = CUISINES.find((c) => c.id === state.config.cuisine)!;
+  const size = PANTRY_SIZES.find((s) => s.id === state.config.size)!;
+  document.querySelector<HTMLElement>('#brand-mark')!.textContent = cuisine.icon;
+  document.querySelector<HTMLElement>('#kitchen-btn')!.innerHTML =
+    `<span class="kitchen-name">${cuisine.name}</span>` +
+    `<span class="kitchen-size">${size.name}</span>`;
+  document.querySelector<HTMLElement>('#highlight-btn')!.textContent =
+    `Highlight matches: ${state.highlight ? 'On' : 'Off'}`;
 }
 
 function renderAll(): void {
@@ -264,11 +329,44 @@ function renderAll(): void {
   renderBowl();
   renderPantry();
   renderProgress();
+  renderKitchenBadge();
 }
 
 function setSelected(uid: number | null): void {
   selectedUid = uid;
   renderBoard();
+}
+
+// -------------------------------------------------------- match highlighting
+
+function updateMatches(): void {
+  const chip = selectedUid !== null ? state.chip(selectedUid) : null;
+  matches = chip ? partnersOf(kitchen, chip.itemId) : NO_MATCHES;
+  mates = chip ? bowlMatesOf(kitchen, chip.itemId) : NO_MATCHES;
+  bowlMatches = chip ? kitchen.multi.has(chip.itemId) : false;
+  paintHints();
+}
+
+/**
+ * Marks every target that forms a recipe with the selection and lets CSS fade
+ * the rest. A direct two-input partner is a full match; something that only
+ * shares a three-input recipe is marked softer, because it needs the bowl.
+ * Classes are painted over the live DOM rather than re-rendering, so selecting
+ * something never rebuilds a 200-chip pantry.
+ */
+function paintHints(): void {
+  const on = state.highlight && selectedUid !== null;
+  document.body.classList.toggle('hinting', on);
+  const chips = document.querySelectorAll<HTMLElement>(
+    '#pantry-grid .chip, #stations .chip, #board .chip, #bowl-items .chip',
+  );
+  for (const el of chips) {
+    const id = el.dataset.item ?? '';
+    const direct = on && matches.has(id);
+    el.classList.toggle('is-match', direct);
+    el.classList.toggle('is-mate', on && !direct && mates.has(id));
+  }
+  bowlEl.classList.toggle('is-match', on && bowlMatches);
 }
 
 // ---------------------------------------------------------------- feedback
@@ -305,7 +403,7 @@ function boardPoint(clientX: number, clientY: number): { x: number; y: number } 
 
 function freeSpot(): { x: number; y: number } {
   const rect = board.getBoundingClientRect();
-  for (let attempt = 0; attempt < 30; attempt++) {
+  for (let tries = 0; tries < 30; tries++) {
     const x = rect.width * (0.15 + Math.random() * 0.6);
     const y = rect.height * (0.15 + Math.random() * 0.6);
     if (state.board.every((c) => Math.hypot(c.x - x, c.y - y) > 70)) return { x, y };
@@ -316,7 +414,7 @@ function freeSpot(): { x: number; y: number } {
 // ---------------------------------------------------------------- combining
 
 function attempt(inputs: string[], consumeUids: number[], at: { x: number; y: number }): void {
-  const result = combine(inputs);
+  const result = combine(kitchen, inputs);
   if (!result) {
     const names = inputs.map((id) => getItem(id).name).join(' + ');
     toast(`${names} — nothing comes of that.`, 'fail');
@@ -358,7 +456,7 @@ function useStation(stationId: string): void {
   }
   const inputs = [...state.bowl, stationId];
   const spot = freeSpot();
-  if (combine(inputs)) state.bowl = [];
+  if (combine(kitchen, inputs)) state.bowl = [];
   attempt(inputs, [], spot);
   renderBowl();
 }
@@ -370,7 +468,7 @@ function mixBowl(): void {
   }
   const inputs = [...state.bowl];
   const spot = freeSpot();
-  if (combine(inputs)) state.bowl = [];
+  if (combine(kitchen, inputs)) state.bowl = [];
   attempt(inputs, [], spot);
   renderBowl();
 }
@@ -494,7 +592,7 @@ initDrag({
 // ---------------------------------------------------------------- book
 
 function renderBook(): void {
-  const known = [...ITEMS.values()].filter(
+  const known = [...kitchen.items.values()].filter(
     (i) => i.kind !== 'station' && state.discovered.has(i.id),
   );
   const groups: { kind: ItemKind; title: string }[] = [
@@ -509,7 +607,7 @@ function renderBook(): void {
         .filter((i) => i.kind === kind)
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((item) => {
-          const ways = recipesFor(item.id)
+          const ways = recipesFor(kitchen, item.id)
             .map((r) => r.inputs.map((id) => getItem(id).name).join(' + '))
             .join('<br/>');
           return `<tr><th>${item.name}</th><td>${ways || '<em>a pantry staple</em>'}</td></tr>`;
@@ -520,10 +618,74 @@ function renderBook(): void {
     .join('');
 }
 
+// ---------------------------------------------------------------- setup
+
+let draft: Config = { ...state.config };
+
+function renderSetup(): void {
+  const cuisineBox = document.querySelector<HTMLElement>('#cuisine-choices')!;
+  cuisineBox.replaceChildren(
+    ...CUISINES.map((c) => {
+      const b = document.createElement('button');
+      b.className = `choice${draft.cuisine === c.id ? ' is-active' : ''}`;
+      b.innerHTML =
+        `<span class="choice-icon">${c.icon}</span>` +
+        `<span class="choice-name">${c.name}</span>` +
+        `<span class="choice-blurb">${c.blurb}</span>`;
+      b.addEventListener('click', () => {
+        draft = { ...draft, cuisine: c.id as CuisineId };
+        renderSetup();
+      });
+      return b;
+    }),
+  );
+
+  const sizeBox = document.querySelector<HTMLElement>('#size-choices')!;
+  sizeBox.replaceChildren(
+    ...PANTRY_SIZES.map((s) => {
+      const b = document.createElement('button');
+      b.className = `choice${draft.size === s.id ? ' is-active' : ''}`;
+      b.innerHTML =
+        `<span class="choice-name">${s.name}</span>` +
+        `<span class="choice-blurb">${s.blurb}</span>`;
+      b.addEventListener('click', () => {
+        draft = { ...draft, size: s.id as PantrySize };
+        renderSetup();
+      });
+      return b;
+    }),
+  );
+
+  const preview = buildKitchen(draft);
+  const stocked = preview.starting.filter((id) => getItem(id).kind !== 'station').length;
+  document.querySelector<HTMLElement>('#setup-summary')!.textContent =
+    `${stocked} ingredients and ${preview.stations.length} stations stocked, ` +
+    `${preview.discoverable} things to discover across ${preview.recipes.length} recipes.`;
+}
+
+function openSetup(mustChoose: boolean): void {
+  draft = { ...state.config };
+  document.querySelector<HTMLElement>('#setup-close')!.hidden = mustChoose;
+  renderSetup();
+  setupEl.hidden = false;
+}
+
+function enterKitchen(config: Config): void {
+  kitchen = buildKitchen(config);
+  state.enter(kitchen);
+  selectedUid = null;
+  filter = 'all';
+  query = '';
+  searchInput.value = '';
+  renderFilters();
+  renderStations();
+  renderAll();
+}
+
 // ---------------------------------------------------------------- events
 
 document.querySelector('#hint-btn')!.addEventListener('click', () => {
-  const hint = findHint(state.discovered);
+  const hint = findHint(kitchen, state.discovered);
   if (!hint) {
     toast('Nothing new within reach — try combining what you have.', 'fail');
     return;
@@ -532,6 +694,7 @@ document.querySelector('#hint-btn')!.addEventListener('click', () => {
 });
 
 document.querySelector('#mix-btn')!.addEventListener('click', mixBowl);
+document.querySelector('#kitchen-btn')!.addEventListener('click', () => openSetup(false));
 
 // Tapping the bowl sends the selected bench chip into it.
 bowlEl.addEventListener('click', (e) => {
@@ -544,6 +707,13 @@ board.addEventListener('click', (e) => {
   if (e.target === board && selectedUid !== null) setSelected(null);
 });
 
+document.querySelector('#highlight-btn')!.addEventListener('click', () => {
+  menu.open = false;
+  state.setHighlight(!state.highlight);
+  renderKitchenBadge();
+  paintHints();
+});
+
 document.querySelector('#clear-btn')!.addEventListener('click', () => {
   menu.open = false;
   state.board = [];
@@ -554,8 +724,8 @@ document.querySelector('#clear-btn')!.addEventListener('click', () => {
 
 document.querySelector('#reset-btn')!.addEventListener('click', () => {
   menu.open = false;
-  if (!confirm('Reset all progress? Every discovery will be forgotten.')) return;
-  state.reset();
+  if (!confirm('Reset this kitchen? Its discoveries will be forgotten.')) return;
+  state.resetRun();
   selectedUid = null;
   renderAll();
 });
@@ -570,6 +740,14 @@ document.querySelector('#book-close')!.addEventListener('click', () => {
 });
 bookEl.addEventListener('click', (e) => {
   if (e.target === bookEl) bookEl.hidden = true;
+});
+
+document.querySelector('#setup-go')!.addEventListener('click', () => {
+  setupEl.hidden = true;
+  enterKitchen(draft);
+});
+document.querySelector('#setup-close')!.addEventListener('click', () => {
+  setupEl.hidden = true;
 });
 
 document.addEventListener('click', (e) => {
@@ -588,6 +766,5 @@ window.addEventListener('resize', () => {
   resizeTimer = window.setTimeout(renderBoard, 120);
 });
 
-renderFilters();
-renderStations();
-renderAll();
+enterKitchen(state.config);
+if (firstRun) openSetup(true);

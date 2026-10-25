@@ -20,16 +20,25 @@ app.innerHTML = `
     </div>
     <div class="topbar-actions">
       <button id="hint-btn" class="btn">Hint</button>
-      <button id="book-btn" class="btn">Recipe Book</button>
-      <button id="clear-btn" class="btn">Clear Bench</button>
-      <button id="reset-btn" class="btn btn-quiet">Reset</button>
+      <details class="menu" id="menu">
+        <summary class="btn" title="More actions">⋯</summary>
+        <div class="menu-pop">
+          <button id="book-btn">Recipe Book</button>
+          <button id="clear-btn">Clear Bench</button>
+          <button id="reset-btn">Reset Progress</button>
+        </div>
+      </details>
     </div>
   </header>
 
   <main class="layout">
     <section class="bench" id="board" data-drop="board">
-      <p class="bench-hint">Drag an ingredient from the pantry onto the bench.<br/>
-      Drop one item onto another to combine, or onto a station below to cook it.</p>
+      <p class="bench-hint">
+        <span class="hint-pointer">Drag an ingredient from the pantry onto the bench.<br/>
+        Drop one item onto another to combine, or onto a station to cook it.</span>
+        <span class="hint-touch">Tap an ingredient to put it on the bench.<br/>
+        Tap a chip to select it, then tap another chip, a station, or the bowl.</span>
+      </p>
     </section>
 
     <aside class="pantry" data-drop="pantry">
@@ -64,6 +73,7 @@ app.innerHTML = `
 const board = document.querySelector<HTMLElement>('#board')!;
 const benchHint = document.querySelector<HTMLElement>('.bench-hint')!;
 const pantryGrid = document.querySelector<HTMLElement>('#pantry-grid')!;
+const bowlEl = document.querySelector<HTMLElement>('#bowl')!;
 const bowlItems = document.querySelector<HTMLElement>('#bowl-items')!;
 const stationsEl = document.querySelector<HTMLElement>('#stations')!;
 const toasts = document.querySelector<HTMLElement>('#toasts')!;
@@ -71,6 +81,14 @@ const searchInput = document.querySelector<HTMLInputElement>('#search')!;
 const filtersEl = document.querySelector<HTMLElement>('#filters')!;
 const bookEl = document.querySelector<HTMLElement>('#book')!;
 const bookBody = document.querySelector<HTMLElement>('#book-body')!;
+const menu = document.querySelector<HTMLDetailsElement>('#menu')!;
+
+/**
+ * Tap-to-combine: on touch there is no room to drag from the pantry without
+ * fighting the scroll, so a bench chip can be selected and then a second target
+ * tapped. Pointer users can ignore this entirely and keep dragging.
+ */
+let selectedUid: number | null = null;
 
 // ---------------------------------------------------------------- chip DOM
 
@@ -164,30 +182,63 @@ function renderStations(): void {
       const el = chipEl(item, 'chip-tile station-tile');
       el.dataset.drop = 'station';
       el.dataset.id = item.id;
-      el.addEventListener('click', () => useStationOnBowl(item.id));
+      el.addEventListener('click', () => useStation(item.id));
       return el;
     }),
   );
 }
 
 function renderBoard(): void {
+  if (selectedUid !== null && !state.chip(selectedUid)) selectedUid = null;
+  document.body.classList.toggle('has-selection', selectedUid !== null);
   benchHint.hidden = state.board.length > 0;
+
   for (const el of board.querySelectorAll('.chip')) el.remove();
   for (const chip of state.board) {
     const item = getItem(chip.itemId);
     const el = chipEl(item, 'chip-board');
     el.dataset.drop = 'chip';
     el.dataset.uid = String(chip.uid);
+    el.classList.toggle('is-selected', chip.uid === selectedUid);
     el.style.left = `${chip.x}px`;
     el.style.top = `${chip.y}px`;
     dragSource(el, () => ({ itemId: chip.itemId, fromUid: chip.uid, fromBowl: null }), item, true);
     board.appendChild(el);
   }
+  settleChips();
+}
+
+/**
+ * Chips are positioned by their centre, so a point-clamp still lets a wide one
+ * hang off the edge. Measure the rendered width and pull it fully inside — this
+ * is what keeps the bench tidy after a rotate.
+ */
+function settleChips(): void {
+  const rect = board.getBoundingClientRect();
+  if (rect.width === 0) return;
+  for (const el of board.querySelectorAll<HTMLElement>('.chip-board')) {
+    const chip = state.chip(Number(el.dataset.uid));
+    if (!chip) continue;
+    const halfW = el.offsetWidth / 2 + 4;
+    const halfH = el.offsetHeight / 2 + 4;
+    const x = clamp(chip.x, halfW, rect.width - halfW);
+    const y = clamp(chip.y, halfH, rect.height - halfH);
+    if (x !== chip.x || y !== chip.y) {
+      chip.x = x;
+      chip.y = y;
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+    }
+  }
 }
 
 function renderBowl(): void {
   if (state.bowl.length === 0) {
-    bowlItems.innerHTML = `<p class="empty">Drop 2 or more things here, then Mix — or tap a station.</p>`;
+    bowlItems.innerHTML =
+      `<p class="empty">` +
+      `<span class="hint-pointer">Drop 2 or more things here, then Mix — or tap a station.</span>` +
+      `<span class="hint-touch">Add 2 or more, then Mix.</span>` +
+      `</p>`;
     return;
   }
   bowlItems.replaceChildren(
@@ -204,8 +255,8 @@ function renderProgress(): void {
   const found = [...state.discovered].filter((id) => getItem(id).kind !== 'station').length;
   const pct = Math.round((found / TOTAL_DISCOVERABLE) * 100);
   document.querySelector<HTMLElement>('#progress-fill')!.style.width = `${pct}%`;
-  document.querySelector<HTMLElement>('#progress-label')!.textContent =
-    `${found} / ${TOTAL_DISCOVERABLE} discovered`;
+  document.querySelector<HTMLElement>('#progress-label')!.innerHTML =
+    `${found}<span class="sep"> / </span>${TOTAL_DISCOVERABLE}<span class="progress-word"> discovered</span>`;
 }
 
 function renderAll(): void {
@@ -215,6 +266,11 @@ function renderAll(): void {
   renderProgress();
 }
 
+function setSelected(uid: number | null): void {
+  selectedUid = uid;
+  renderBoard();
+}
+
 // ---------------------------------------------------------------- feedback
 
 function toast(message: string, variant: 'info' | 'discovery' | 'fail' = 'info'): void {
@@ -222,6 +278,8 @@ function toast(message: string, variant: 'info' | 'discovery' | 'fail' = 'info')
   el.className = `toast toast-${variant}`;
   el.textContent = message;
   toasts.appendChild(el);
+  // A tall stack would swallow the bench on a phone, so keep only the newest.
+  while (toasts.childElementCount > 3) toasts.firstElementChild!.remove();
   setTimeout(() => {
     el.classList.add('is-leaving');
     setTimeout(() => el.remove(), 300);
@@ -235,6 +293,8 @@ function nudge(uid: number): void {
 
 // ---------------------------------------------------------------- placement
 
+const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), Math.max(lo, hi));
+
 function boardPoint(clientX: number, clientY: number): { x: number; y: number } {
   const rect = board.getBoundingClientRect();
   return {
@@ -242,8 +302,6 @@ function boardPoint(clientX: number, clientY: number): { x: number; y: number } 
     y: clamp(clientY - rect.top, 8, rect.height - 8),
   };
 }
-
-const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), Math.max(lo, hi));
 
 function freeSpot(): { x: number; y: number } {
   const rect = board.getBoundingClientRect();
@@ -273,8 +331,7 @@ function attempt(inputs: string[], consumeUids: number[], at: { x: number; y: nu
   const isNew = state.discover(result);
   renderAll();
 
-  const fresh = board.querySelector(`.chip[data-uid="${state.board.at(-1)!.uid}"]`);
-  fresh?.classList.add('pop');
+  board.querySelector(`.chip[data-uid="${state.board.at(-1)!.uid}"]`)?.classList.add('pop');
 
   if (isNew) {
     toast(`New: ${item.name}${item.blurb ? ` — ${item.blurb}` : ''}`, 'discovery');
@@ -283,9 +340,20 @@ function attempt(inputs: string[], consumeUids: number[], at: { x: number; y: nu
   }
 }
 
-function useStationOnBowl(stationId: string): void {
+/** A station applies to the selected bench chip if there is one, else to the bowl. */
+function useStation(stationId: string): void {
+  if (selectedUid !== null) {
+    const chip = state.chip(selectedUid);
+    selectedUid = null;
+    if (chip) {
+      attempt([chip.itemId, stationId], [chip.uid], { x: chip.x, y: chip.y });
+      return;
+    }
+    renderBoard();
+  }
+
   if (state.bowl.length === 0) {
-    toast('Put something in the prep bowl first.', 'fail');
+    toast('Select something on the bench, or fill the prep bowl first.', 'fail');
     return;
   }
   const inputs = [...state.bowl, stationId];
@@ -309,21 +377,57 @@ function mixBowl(): void {
 
 // ---------------------------------------------------------------- drag wiring
 
+/** Moves the selected bench chip into the prep bowl. Returns false if nothing was selected. */
+function bowlTakeSelection(): boolean {
+  if (selectedUid === null) return false;
+  const chip = state.chip(selectedUid);
+  selectedUid = null;
+  if (chip) {
+    state.bowl.push(chip.itemId);
+    state.removeChip(chip.uid);
+    renderBowl();
+  }
+  renderBoard();
+  return true;
+}
+
 initDrag({
   onClick(payload) {
     if (payload.fromBowl !== null) {
+      // A selection outranks remove-on-tap: the bowl strip is mostly chips on a
+      // phone, so tapping one is far more likely to mean "put it here".
+      if (bowlTakeSelection()) return;
       state.bowl.splice(payload.fromBowl, 1);
       renderBowl();
       return;
     }
+
+    // Pantry tap: put a copy on the bench.
     if (payload.fromUid === null) {
       const spot = freeSpot();
       state.addChip(payload.itemId, spot.x, spot.y);
       renderBoard();
+      return;
     }
+
+    // Bench tap: select, deselect, or combine with whatever is already selected.
+    const tapped = payload.fromUid;
+    if (selectedUid === null || selectedUid === tapped) {
+      setSelected(selectedUid === tapped ? null : tapped);
+      return;
+    }
+    const first = state.chip(selectedUid);
+    const second = state.chip(tapped);
+    selectedUid = null;
+    if (!first || !second) {
+      renderBoard();
+      return;
+    }
+    attempt([first.itemId, second.itemId], [first.uid, second.uid], { x: second.x, y: second.y });
   },
 
   onDrop(payload, target, x, y) {
+    if (selectedUid !== null) setSelected(null);
     const drop = target instanceof HTMLElement ? target.dataset.drop : undefined;
 
     if (drop === 'chip') {
@@ -429,19 +533,35 @@ document.querySelector('#hint-btn')!.addEventListener('click', () => {
 
 document.querySelector('#mix-btn')!.addEventListener('click', mixBowl);
 
+// Tapping the bowl sends the selected bench chip into it.
+bowlEl.addEventListener('click', (e) => {
+  if ((e.target as HTMLElement).closest('.chip')) return;
+  bowlTakeSelection();
+});
+
+// Tapping empty bench clears the selection.
+board.addEventListener('click', (e) => {
+  if (e.target === board && selectedUid !== null) setSelected(null);
+});
+
 document.querySelector('#clear-btn')!.addEventListener('click', () => {
+  menu.open = false;
   state.board = [];
   state.bowl = [];
+  selectedUid = null;
   renderAll();
 });
 
 document.querySelector('#reset-btn')!.addEventListener('click', () => {
+  menu.open = false;
   if (!confirm('Reset all progress? Every discovery will be forgotten.')) return;
   state.reset();
+  selectedUid = null;
   renderAll();
 });
 
 document.querySelector('#book-btn')!.addEventListener('click', () => {
+  menu.open = false;
   renderBook();
   bookEl.hidden = false;
 });
@@ -452,12 +572,21 @@ bookEl.addEventListener('click', (e) => {
   if (e.target === bookEl) bookEl.hidden = true;
 });
 
+document.addEventListener('click', (e) => {
+  if (menu.open && !menu.contains(e.target as Node)) menu.open = false;
+});
+
 searchInput.addEventListener('input', () => {
   query = searchInput.value.trim().toLowerCase();
   renderPantry();
 });
 
-window.addEventListener('resize', renderBoard);
+// Keep bench chips inside the bench when it resizes or the phone rotates.
+let resizeTimer = 0;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(renderBoard, 120);
+});
 
 renderFilters();
 renderStations();

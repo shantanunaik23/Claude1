@@ -18,6 +18,8 @@ let session: {
   payload: DragPayload;
   makeGhost: () => HTMLElement;
   source: HTMLElement | null;
+  /** Touch drags float the chip above the finger so it stays visible. */
+  lift: number;
   startX: number;
   startY: number;
   ghost: HTMLElement | null;
@@ -42,7 +44,8 @@ export function beginDrag(
   source: HTMLElement | null = null,
 ): void {
   if (e.button !== 0 && e.pointerType === 'mouse') return;
-  session = { payload, makeGhost, source, startX: e.clientX, startY: e.clientY, ghost: null, hovered: null };
+  const lift = e.pointerType === 'touch' ? 46 : 0;
+  session = { payload, makeGhost, source, lift, startX: e.clientX, startY: e.clientY, ghost: null, hovered: null };
 }
 
 function onMove(e: PointerEvent): void {
@@ -58,16 +61,16 @@ function onMove(e: PointerEvent): void {
     session.source?.classList.add('is-source');
   }
   e.preventDefault();
-  session.ghost.style.transform = `translate(${e.clientX}px, ${e.clientY}px) translate(-50%, -50%)`;
-  setHovered(hitTest(e.clientX, e.clientY));
+  session.ghost.style.transform = `translate(${e.clientX}px, ${e.clientY - session.lift}px) translate(-50%, -50%)`;
+  setHovered(hitTest(e.clientX, e.clientY - session.lift));
 }
 
 function onUp(e: PointerEvent): void {
   if (!session) return;
-  const { payload, ghost } = session;
-  const target = ghost ? hitTest(e.clientX, e.clientY) : null;
+  const { payload, ghost, lift } = session;
+  const target = ghost ? hitTest(e.clientX, e.clientY - lift) : null;
   cleanup();
-  if (ghost) handlers.onDrop(payload, target, e.clientX, e.clientY);
+  if (ghost) handlers.onDrop(payload, target, e.clientX, e.clientY - lift);
   else handlers.onClick(payload);
 }
 
